@@ -1,0 +1,7 @@
+[options]
+custom-rendezvous-server = "old.example.com"
+verification-method = "use-both-passwords"
+allow-remote-config-modification = "Y"
+
+[tcp]
+direct_access_port = 21118

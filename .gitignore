@@ -1,0 +1,10 @@
+# Downloaded packages and temp artifacts
+*.deb
+*.rpm
+*.zst
+*.AppImage
+
+# Test scratch directory
+test/tmp/
+
+.DS_Store

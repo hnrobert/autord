@@ -147,7 +147,8 @@ maybe_run() {
 confirm() {
   local prompt=$1 ans=""
   if (( ASSUME_YES )); then return 0; fi
-  if ! read -r -p "$prompt [Y/n] " ans </dev/tty 2>/dev/null; then
+  # note: read -p prints the prompt on stderr; do not redirect it away
+  if ! read -r -p "$prompt [Y/n] " ans </dev/tty; then
     err "Cannot read input (no tty?)"
     return 1
   fi
@@ -161,7 +162,8 @@ ask_yn() { # $1=prompt $2=default Y/N
   if (( ASSUME_YES )); then
     ans=$def
   else
-    if ! read -r -p "$prompt [$def]: " ans </dev/tty 2>/dev/null; then
+    # note: read -p prints the prompt on stderr; do not redirect it away
+    if ! read -r -p "$prompt [$def]: " ans </dev/tty; then
       err "Cannot read input"; return 1
     fi
     ans=$(trim "$ans"); [[ -z $ans ]] && ans=$def

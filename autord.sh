@@ -1260,7 +1260,8 @@ main() {
   exit 0
 }
 
-# Run main only when executed (allows sourcing for unit tests)
-if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+# Run main when executed as a file or piped into bash (BASH_SOURCE is unset for
+# stdin scripts, which set -u would turn into an error); skip only when sourced
+if [[ ${BASH_SOURCE[0]:-} == "$0" || -z ${BASH_SOURCE[0]:-} ]]; then
   main "$@"
 fi

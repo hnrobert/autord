@@ -35,9 +35,9 @@ ARCH="" DISTRO_ID="" DISTRO_LIKE="" DISTRO_PRETTY="" DISTRO_VERSION_ID=""
 DISTRO_FAMILY="unknown" PKG_MGR="" HAVE_SYSTEMD=0 HAVE_PYTHON=0
 DESKTOP_USER="" DESKTOP_HOME="" DESKTOP_GROUP=""
 ASSET_NAME="" ASSET_URL="" ASSET_LIST=""
+CACHE_DIR="" CACHE_FILE="" PART_FILE="" DONE_FILE="" DL_PID=""
 RD_BIN="" INSTALL_METHOD=""
 C_G="" C_Y="" C_R="" C_B="" C_0=""
-TMPDIR_AUTORD=""
 RD_CLI_OUT=""
 TOML_FALLBACK=0 RD_PASSWORD_OK=0
 declare -gA PENDING_TOML=()
@@ -59,8 +59,10 @@ banner() { printf '\n%s== %s ==%s\n' "$C_B" "$*" "$C_0" >&2; }
 
 # ---------------------------------------------------------------- basic utilities
 cleanup() {
-  if [[ -n ${TMPDIR_AUTORD:-} && -d $TMPDIR_AUTORD ]]; then
-    rm -rf "$TMPDIR_AUTORD"
+  # Stop a background download (its partial file stays for resume next run)
+  if [[ -n ${DL_PID:-} ]]; then
+    pkill -P "$DL_PID" 2>/dev/null || true
+    kill "$DL_PID" 2>/dev/null || true
   fi
   return 0
 }
@@ -86,6 +88,9 @@ Install:
   --mirror <prefix>         GitHub download prefix replacing https://github.com
                             (e.g. https://ghproxy.net/https://github.com)
   --force                   Reinstall even if the same version is installed
+                            (packages are cached in /var/cache/autord and reused;
+                             the download starts in the background before the
+                             wizard questions so it overlaps with your input)
 
 Configure:
   --no-lan-discovery        Do not enable LAN discovery (default: enabled)
@@ -370,22 +375,81 @@ is_rustdesk_installed() {
   [[ $v == *"$RESOLVED_VERSION"* ]]
 }
 
-download_asset() {
-  local f="$TMPDIR_AUTORD/$ASSET_NAME"
-  info "Download: $ASSET_URL"
-  maybe_run curl -fL --retry 3 --connect-timeout 15 --max-time 600 -o "$f" "$ASSET_URL"
-  if (( DRY_RUN )); then return 0; fi
-  if [[ ! -s $f ]]; then die "Download failed: $ASSET_URL"; fi
+cache_paths() {
+  CACHE_DIR="/var/cache/autord"
+  CACHE_FILE="$CACHE_DIR/$ASSET_NAME"
+  PART_FILE="$CACHE_FILE.part"
+  DONE_FILE="$CACHE_FILE.done"
+  return 0
+}
+
+cache_valid() {
+  [[ -s $CACHE_FILE ]] || return 1
+  local sz=0
+  sz=$(stat -c%s "$CACHE_FILE" 2>/dev/null || echo 0)
+  (( sz >= 1000000 ))
+}
+
+# Decide the download source: reuse the cache, or start a background download
+# right away so the wizard/confirm runs while the package downloads
+prepare_download() {
+  if (( DRY_RUN )); then
+    info "[dry-run] curl -fL --retry 3 -C - -o $PART_FILE $ASSET_URL"
+    return 0
+  fi
+  mkdir -p "$CACHE_DIR"
+  if cache_valid; then
+    info "Using cached package: $CACHE_FILE"
+    return 0
+  fi
+  rm -f "$DONE_FILE"
+  info "Downloading $ASSET_NAME in the background while you answer the questions..."
+  (
+    if curl -fL --retry 3 -C - --connect-timeout 15 --max-time 1800 \
+         -o "$PART_FILE" "$ASSET_URL" >/dev/null 2>&1; then
+      printf 'ok\n' > "$DONE_FILE"
+    else
+      printf 'fail\n' > "$DONE_FILE"
+    fi
+  ) &
+  DL_PID=$!
+  return 0
+}
+
+# Wait for the background download (if any) and finalize the cache entry
+finish_download() {
+  (( DRY_RUN )) && return 0
+  [[ -n $DL_PID ]] || return 0
+  if [[ ! -s $DONE_FILE ]]; then
+    info "Waiting for the background download to finish..."
+    local sz=0
+    while [[ ! -s $DONE_FILE ]]; do
+      sz=$(stat -c%s "$PART_FILE" 2>/dev/null || echo 0)
+      printf '\r  downloaded %s KB  ' "$(( sz / 1024 ))" >&2
+      sleep 1
+    done
+    printf '\n' >&2
+  fi
+  wait "$DL_PID" 2>/dev/null || true
+  DL_PID=""
+  if ! grep -q '^ok$' "$DONE_FILE" 2>/dev/null; then
+    rm -f "$DONE_FILE"
+    die "Background download failed. Partial file kept for resume: $PART_FILE (delete it to start fresh)"
+  fi
+  rm -f "$DONE_FILE"
+  mv -f "$PART_FILE" "$CACHE_FILE"
   local size=0
-  size=$(stat -c%s "$f" 2>/dev/null || echo 0)
+  size=$(stat -c%s "$CACHE_FILE" 2>/dev/null || echo 0)
   if (( size < 1000000 )); then
+    rm -f "$CACHE_FILE"
     die "Downloaded file is only ${size} bytes (suspicious); aborting"
   fi
+  info "Package cached at $CACHE_FILE ($(( size / 1048576 )) MB)"
   return 0
 }
 
 install_deb() {
-  local f="$TMPDIR_AUTORD/$ASSET_NAME"
+  local f="$CACHE_FILE"
   if ! maybe_run env DEBIAN_FRONTEND=noninteractive apt-get update -qq; then
     warn "apt-get update failed (ignored)"
   fi
@@ -394,7 +458,7 @@ install_deb() {
 }
 
 install_rpm() {
-  local f="$TMPDIR_AUTORD/$ASSET_NAME"
+  local f="$CACHE_FILE"
   case $PKG_MGR in
     dnf)      maybe_run dnf install -y "$f" ;;
     yum)      maybe_run yum localinstall -y "$f" ;;
@@ -405,13 +469,13 @@ install_rpm() {
 }
 
 install_suse() {
-  local f="$TMPDIR_AUTORD/$ASSET_NAME"
+  local f="$CACHE_FILE"
   maybe_run zypper --non-interactive install --allow-unsigned-rpm "$f"
   INSTALL_METHOD=rpm
 }
 
 install_arch() {
-  local f="$TMPDIR_AUTORD/$ASSET_NAME"
+  local f="$CACHE_FILE"
   maybe_run pacman -U --noconfirm "$f"
   INSTALL_METHOD=pacman
 }
@@ -419,7 +483,7 @@ install_arch() {
 install_appimage() {
   warn "AppImage mode: no systemd service/IPC -> config is written to RustDesk2.toml directly; the password cannot be set via CLI"
   maybe_run mkdir -p /opt/rustdesk
-  maybe_run install -m 0755 "$TMPDIR_AUTORD/$ASSET_NAME" /opt/rustdesk/rustdesk.AppImage
+  maybe_run install -m 0755 "$CACHE_FILE" /opt/rustdesk/rustdesk.AppImage
   maybe_run ln -sf /opt/rustdesk/rustdesk.AppImage /usr/local/bin/rustdesk
   INSTALL_METHOD=appimage
 }
@@ -1001,6 +1065,7 @@ do_uninstall() {
   esac
   maybe_run rm -rf /opt/rustdesk
   maybe_run rm -f /usr/local/bin/rustdesk
+  maybe_run rm -rf /var/cache/autord
   if (( DRY_RUN )); then return 0; fi
   if command -v rustdesk >/dev/null 2>&1; then
     warn "The rustdesk binary is still present; please check"
@@ -1203,7 +1268,6 @@ main() {
   apply_env_overrides
   validate_args
 
-  TMPDIR_AUTORD=$(mktemp -d /tmp/autord.XXXXXX)
   trap cleanup EXIT
   trap 'exit 130' INT TERM
 
@@ -1235,6 +1299,17 @@ main() {
   resolve_version
   fetch_asset_list
   pick_asset
+  cache_paths
+
+  # Check install state and cache up front; start the download in the
+  # background so the questions below run while the package downloads
+  NEED_INSTALL=0
+  if is_rustdesk_installed && (( ! FORCE )); then
+    info "$RESOLVED_VERSION already installed; skipping download/install"
+  else
+    NEED_INSTALL=1
+    prepare_download
+  fi
 
   if ! has_config_args; then
     run_wizard
@@ -1243,10 +1318,8 @@ main() {
     confirm "Execute this plan?" || die "Aborted"
   fi
 
-  if is_rustdesk_installed && (( ! FORCE )); then
-    info "$RESOLVED_VERSION already installed; skipping download/install"
-  else
-    download_asset
+  if (( NEED_INSTALL )); then
+    finish_download
     install_asset
   fi
   ensure_service

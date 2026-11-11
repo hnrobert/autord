@@ -15,6 +15,11 @@ curl -fsSL https://raw.githubusercontent.com/hnrobert/autord/main/autord.sh | su
 - **Latest version, automatically**: resolves the newest GitHub release (currently 1.5.0) and picks the right
   package per distro (Debian/Ubuntu `.deb`, Fedora/RHEL `.rpm`, openSUSE `-suse.rpm`, Arch `.pkg.tar.zst`;
   falls back to AppImage when nothing matches)
+- **Background download with cache**: the install state and the package cache
+  (`/var/cache/autord`) are checked before the first question; if a download is needed it starts
+  immediately in the background and overlaps with the wizard/confirm, so there is usually nothing
+  left to wait for by the time you finish answering. Partial downloads resume across runs;
+  re-installs reuse the cached package; `--uninstall` clears the cache
 - **LAN access**: enables `enable-lan-discovery` (LAN discovery) + `direct-server` (direct IP access,
   optional port) by default
 - **Remote config modification**: enables `allow-remote-config-modification` by default, so the
@@ -146,6 +151,8 @@ the CLI/GUI. In fallback mode the script warns and skips it; set it later in the
   no official package, so the script falls back to AppImage (or use the AUR `rustdesk` package).
 - **Cannot connect?** Open TCP 21115-21119 (hbbs/hbbr) for cross-subnet / self-hosted setups; direct IP
   access uses port 21118 by default.
+- **Where is the downloaded package?** In `/var/cache/autord` (reused on re-runs; `.part` files are
+  interrupted downloads and resume automatically; delete them to start fresh).
 - **How to change a written option?** Re-run the script with new flags (upserts are idempotent), or
   `sudo rustdesk --option <k> <v>` directly.
 

@@ -121,6 +121,51 @@ assert_eq "b64 relay" "$CS_RELAY" "r2.example.com"
 CONFIG_STRING="not-a-valid-string!!"
 if cs_parse; then bad "garbage string should not parse"; else ok "garbage string rejected"; fi
 
+# ---------------------------------------------------------------- download cache (file:// URL, no network)
+banner "download cache"
+SRCF="$TMP/dummy-pkg.bin"
+head -c 2097152 /dev/urandom > "$SRCF"   # 2 MB
+ASSET_NAME="rustdesk-9.9.9-x86_64.deb"
+ASSET_URL="file://$SRCF"
+CACHE_DIR="$TMP/dlcache"
+CACHE_FILE="$CACHE_DIR/$ASSET_NAME"
+PART_FILE="$CACHE_FILE.part"
+DONE_FILE="$CACHE_FILE.done"
+
+prepare_download
+assert_rc "prepare_download returns 0" $? 0
+if [[ -n $DL_PID ]]; then ok "background download started"; else bad "no background pid"; fi
+finish_download
+assert_rc "finish_download returns 0" $? 0
+sz=$(stat -c%s "$CACHE_FILE" 2>/dev/null || echo 0)
+assert_eq "cached file is complete (2 MB)" "$sz" "2097152"
+if [[ -e $PART_FILE ]]; then bad ".part still present"; else ok ".part renamed away"; fi
+
+DL_PID=""
+if prepare_download 2>&1 >/dev/null | grep -q "Using cached package"; then
+  ok "cache hit reuses file"
+else
+  bad "cache hit not detected"
+fi
+assert_eq "cache hit starts no download" "${DL_PID:-}" ""
+
+# resume: keep the first half as .part, download must complete it
+rm -f "$CACHE_FILE"
+head -c 1048576 "$SRCF" > "$PART_FILE"
+DL_PID=""
+prepare_download >/dev/null 2>&1
+finish_download >/dev/null 2>&1
+sz=$(stat -c%s "$CACHE_FILE" 2>/dev/null || echo 0)
+assert_eq "resume from partial .part completes file" "$sz" "2097152"
+
+# failure path: unreachable URL must die in finish_download
+rm -rf "$CACHE_DIR"; mkdir -p "$CACHE_DIR"
+ASSET_URL="file:///nonexistent/autord-test.bin"
+CACHE_FILE="$CACHE_DIR/x.bin"; PART_FILE="$CACHE_FILE.part"; DONE_FILE="$CACHE_FILE.done"
+DL_PID=""
+prepare_download >/dev/null 2>&1
+if ( finish_download ) >/dev/null 2>&1; then bad "should die on failed download"; else ok "dies on failed download"; fi
+
 # ---------------------------------------------------------------- misc
 banner "misc"
 PW=$(gen_random_password)

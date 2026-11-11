@@ -5,9 +5,6 @@
 ```bash
 # Interactive wizard over the pipe (asks: access -> servers -> password)
 curl -fsSL https://raw.githubusercontent.com/hnrobert/autord/main/autord.sh | sudo bash -s --
-
-# Fully unattended: default public servers + random password (shown once at the end)
-curl -fsSL https://raw.githubusercontent.com/hnrobert/autord/main/autord.sh | sudo bash -s -- --yes --random-password
 ```
 
 ## Features
@@ -109,7 +106,16 @@ curl -fsSL <url>/autord.sh | sudo RD_YES=1 RD_RANDOM_PASSWORD=1 bash -s --
 
 ## Interactive wizard
 
-Run without arguments to start the wizard:
+Run without arguments to start the wizard.
+
+If RustDesk **is already installed**, the wizard first asks in order:
+
+0. Update? — `Upgrade to <latest> [Y/n]` when an older version is found
+   (or `Reinstall <same version> [y/N]`; `--force` flips the default to Y), then
+   `Re-apply configuration (LAN, password, servers) [Y/n]` — answering `n` skips the
+   wizard and just prints the summary (e.g. update-only runs)
+
+Then the configuration questions:
 
 1. Access: LAN discovery? direct IP access + port? allow remote config modification?
 2. Servers: paste the exported config string (Enter to skip); if skipped, each of id/relay/api/key is asked
@@ -155,6 +161,13 @@ the CLI/GUI. In fallback mode the script warns and skips it; set it later in the
   interrupted downloads and resume automatically; delete them to start fresh).
 - **How to change a written option?** Re-run the script with new flags (upserts are idempotent), or
   `sudo rustdesk --option <k> <v>` directly.
+- **Re-running on an installed machine?** Interactively you are asked whether to update and whether
+  to re-apply the config. Unattended (`--yes`), a newer release is installed automatically and the
+  same version is left alone (`--force` reinstalls); configuration flags are always re-applied, and
+  `--yes` without config flags applies the defaults (LAN/direct/remote-config on).
+  "Installed" means the rustdesk **executable** exists (found on `PATH` or in `/usr/bin`,
+  `/usr/local/bin`, `/bin`, `/opt/rustdesk/`); the version from `rustdesk --version` is a best-effort
+  probe — an unreadable version is reported as *unknown* and reinstall is offered as the repair path.
 
 ## Development & tests
 

@@ -166,6 +166,28 @@ DL_PID=""
 prepare_download >/dev/null 2>&1
 if ( finish_download ) >/dev/null 2>&1; then bad "should die on failed download"; else ok "dies on failed download"; fi
 
+# ---------------------------------------------------------------- installed_version
+banner "installed_version"
+mkdir -p "$TMP/fakebin"
+printf '#!/bin/sh\necho "1.5.1 (2026-11-01)"\n' > "$TMP/fakebin/rustdesk"
+chmod +x "$TMP/fakebin/rustdesk"
+RD_BIN="$TMP/fakebin/rustdesk"
+assert_eq "parses version token" "$(installed_version)" "1.5.1"
+printf '#!/bin/sh\nexit 1\n' > "$TMP/fakebin/rustdesk"
+assert_eq "failing binary -> empty" "$(installed_version)" ""
+RD_BIN=""
+assert_eq "no binary -> empty" "$(installed_version)" ""
+
+# ---------------------------------------------------------------- find_rustdesk_bin
+banner "find_rustdesk_bin"
+assert_eq "not installed -> empty" "$(find_rustdesk_bin)" ""
+assert_eq "PATH hit wins" "$(PATH="$TMP/fakebin:$PATH" find_rustdesk_bin)" "$TMP/fakebin/rustdesk"
+RD_SEARCH_PATHS=("$TMP/fakebin/rustdesk")
+assert_eq "search-path fallback (off PATH)" "$(PATH=/nonexistent find_rustdesk_bin)" "$TMP/fakebin/rustdesk"
+mkdir -p "$TMP/noexec"; printf 'x\n' > "$TMP/noexec/rustdesk"; chmod -x "$TMP/noexec/rustdesk"
+RD_SEARCH_PATHS=("$TMP/noexec/rustdesk" "$TMP/fakebin/rustdesk")
+assert_eq "non-executable skipped" "$(PATH=/nonexistent find_rustdesk_bin)" "$TMP/fakebin/rustdesk"
+
 # ---------------------------------------------------------------- misc
 banner "misc"
 PW=$(gen_random_password)

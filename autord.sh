@@ -36,6 +36,7 @@ DISTRO_FAMILY="unknown" PKG_MGR="" HAVE_SYSTEMD=0 HAVE_PYTHON=0
 DESKTOP_USER="" DESKTOP_HOME="" DESKTOP_GROUP=""
 ASSET_NAME="" ASSET_URL="" ASSET_LIST=""
 CACHE_DIR="" CACHE_FILE="" PART_FILE="" DONE_FILE="" DL_PID=""
+INSTALLED_VERSION="" NEED_INSTALL=0 SKIP_CONFIG=0
 RD_BIN="" INSTALL_METHOD=""
 C_G="" C_Y="" C_R="" C_B="" C_0=""
 RD_CLI_OUT=""
@@ -368,11 +369,27 @@ pick_asset() {
 }
 
 # ---------------------------------------------------------------- download & install
-is_rustdesk_installed() {
-  [[ -n $RD_BIN ]] || return 1
+# Returns the installed rustdesk version, or "" when rustdesk is not installed
+installed_version() {
+  if [[ -z $RD_BIN ]]; then printf ''; return 0; fi
   local v=""
   v=$(timeout 10 "$RD_BIN" --version 2>/dev/null || true)
-  [[ $v == *"$RESOLVED_VERSION"* ]]
+  v=$(trim "$v")
+  printf '%s' "${v%% *}"
+}
+
+# Locate the rustdesk executable: PATH first, then common install locations.
+# Presence of the executable is what counts as "installed" (--version output
+# is only a best-effort version probe and may fail on odd/broken installs).
+RD_SEARCH_PATHS=(/usr/bin/rustdesk /usr/local/bin/rustdesk /bin/rustdesk /opt/rustdesk/rustdesk.AppImage)
+find_rustdesk_bin() {
+  local b=""
+  b=$(command -v rustdesk 2>/dev/null || true)
+  if [[ -n $b ]]; then printf '%s' "$b"; return 0; fi
+  for b in "${RD_SEARCH_PATHS[@]}"; do
+    if [[ -x $b ]]; then printf '%s' "$b"; return 0; fi
+  done
+  printf ''
 }
 
 cache_paths() {
@@ -497,10 +514,7 @@ install_asset() {
     *)    install_appimage ;;
   esac
   if (( ! DRY_RUN )); then
-    RD_BIN=$(command -v rustdesk || true)
-    if [[ -z $RD_BIN && -x /usr/local/bin/rustdesk ]]; then
-      RD_BIN=/usr/local/bin/rustdesk
-    fi
+    RD_BIN=$(find_rustdesk_bin)
   fi
   return 0
 }
@@ -978,6 +992,11 @@ print_summary() {
 print_plan() {
   banner "Plan"
   printf '  System   : %s (%s/%s)\n' "${DISTRO_PRETTY:-unknown}" "$DISTRO_FAMILY" "$ARCH"
+  if (( NEED_INSTALL )); then
+    printf '  Install  : download + install %s\n' "$RESOLVED_VERSION"
+  else
+    printf '  Install  : skipped (%s already installed)\n' "${INSTALLED_VERSION:-none}"
+  fi
   printf '  Version  : %s  Asset: %s\n' "$RESOLVED_VERSION" "$ASSET_NAME"
   printf '  LAN      : discovery=%s direct=%s%s\n' \
     "$( (( LAN_DISCOVERY )) && echo on || echo off )" \
@@ -1079,18 +1098,56 @@ do_uninstall() {
 }
 
 # ---------------------------------------------------------------- wizard
-run_wizard() {
-  # Actually open /dev/tty ([[ -r ]] can still be true without a controlling tty)
+# Actually open /dev/tty ([[ -r ]] can still be true without a controlling tty)
+require_tty() {
   if ! { : </dev/tty; } 2>/dev/null; then
-    err "No options given and no interactive terminal available"
+    err "No configuration flags given, no --yes, and no interactive terminal available."
+    err "Pass flags (see --help) or run in a terminal to use the wizard."
     usage
     exit 2
   fi
+  return 0
+}
+
+# Existing installation: ask in order whether to update the binary and
+# whether to re-apply the configuration
+ask_existing_install() {
+  banner "RustDesk ${INSTALLED_VERSION:-unknown version} is already installed"
+  if [[ -z $INSTALLED_VERSION ]]; then
+    if ask_yn "Reinstall RustDesk (installed version unknown)" "Y"; then
+      NEED_INSTALL=1
+      prepare_download
+    fi
+  elif [[ $INSTALLED_VERSION != "$RESOLVED_VERSION" ]]; then
+    if ask_yn "Upgrade to $RESOLVED_VERSION" "Y"; then
+      NEED_INSTALL=1
+      prepare_download
+    fi
+  else
+    local def=N
+    (( FORCE )) && def=Y
+    if ask_yn "Reinstall $RESOLVED_VERSION (same version)" "$def"; then
+      NEED_INSTALL=1
+      prepare_download
+    fi
+  fi
+  if ! ask_yn "Re-apply configuration (LAN, password, servers)" "Y"; then
+    SKIP_CONFIG=1
+  fi
+  return 0
+}
+
+run_wizard() {
+  require_tty
   banner "autord wizard"
   printf '  System: %s (%s/%s)  Target version: %s\n' \
     "${DISTRO_PRETTY:-unknown}" "$DISTRO_FAMILY" "$ARCH" "$RESOLVED_VERSION"
   printf '  Tip: press Enter to accept the [default] value.\n'
-  confirm "Continue installing RustDesk?" || die "Aborted"
+  if (( NEED_INSTALL )); then
+    confirm "Continue installing RustDesk?" || die "Aborted"
+  else
+    confirm "Continue configuring RustDesk (no reinstall)?" || die "Aborted"
+  fi
 
   banner "1/3 Access"
   if ask_yn "Enable LAN discovery (enable-lan-discovery)" "Y"; then LAN_DISCOVERY=1; else LAN_DISCOVERY=0; fi
@@ -1275,7 +1332,7 @@ main() {
   command -v python3 >/dev/null 2>&1 && HAVE_PYTHON=1
   have_systemd
   desktop_user_info
-  RD_BIN=$(command -v rustdesk || true)
+  RD_BIN=$(find_rustdesk_bin)
 
   if (( DO_STATUS )); then
     detect_distro
@@ -1301,21 +1358,34 @@ main() {
   pick_asset
   cache_paths
 
-  # Check install state and cache up front; start the download in the
-  # background so the questions below run while the package downloads
+  INSTALLED_VERSION=$(installed_version)
   NEED_INSTALL=0
-  if is_rustdesk_installed && (( ! FORCE )); then
-    info "$RESOLVED_VERSION already installed; skipping download/install"
-  else
+  SKIP_CONFIG=0
+
+  if [[ -z $RD_BIN ]]; then
+    # Fresh install (no executable anywhere): start the download right away
+    # so it overlaps with input
+    NEED_INSTALL=1
+    prepare_download
+  elif ! has_config_args && (( ! ASSUME_YES )); then
+    # Existing installation, interactive: ask update / re-config in order
+    require_tty
+    ask_existing_install
+  elif [[ -z $INSTALLED_VERSION || $INSTALLED_VERSION != "$RESOLVED_VERSION" || $FORCE -eq 1 ]]; then
+    # Existing installation, unattended (--yes or flags given): upgrade when
+    # the version differs or is unknown (or --force), then apply configuration
     NEED_INSTALL=1
     prepare_download
   fi
+  # else: same version already installed, unattended -> configure only
 
-  if ! has_config_args; then
-    run_wizard
-  else
-    print_plan
-    confirm "Execute this plan?" || die "Aborted"
+  if (( ! SKIP_CONFIG )); then
+    if ! has_config_args && (( ! ASSUME_YES )); then
+      run_wizard
+    else
+      print_plan
+      confirm "Execute this plan?" || die "Aborted"
+    fi
   fi
 
   if (( NEED_INSTALL )); then
@@ -1324,12 +1394,14 @@ main() {
   fi
   ensure_service
 
-  apply_lan_options
-  apply_remote_config_mod
-  apply_server_config
-  verify_server_config
-  apply_password
-  apply_toml_fallback_all
+  if (( ! SKIP_CONFIG )); then
+    apply_lan_options
+    apply_remote_config_mod
+    apply_server_config
+    verify_server_config
+    apply_password
+    apply_toml_fallback_all
+  fi
 
   print_summary
   exit 0
